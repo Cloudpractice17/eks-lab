@@ -1,0 +1,39 @@
+# WHY Checkov runs before terraform plan:
+# Checkov catches misconfigurations in .tf files — open security groups,
+# unencrypted storage, missing tags, public S3 buckets — before anything
+# touches AWS. It's faster to catch a policy violation here than to
+# apply it and clean it up later.
+#
+# This file tells Checkov which checks to skip (with reasons) so
+# the pipeline doesn't fail on intentional exceptions.
+
+compact: true
+directory:
+  - ./
+
+# Checks to skip — document WHY for every skip so future engineers
+# don't wonder if it was intentional
+skip-check:
+  # CKV_AWS_8: IMDSv2 not enforced on NAT instance
+  # WHY: the NAT instance uses a standard AMI that doesn't support
+  # IMDSv2 by default. Will be enforced in a future AMI update.
+  - CKV_AWS_8
+
+  # CKV_AWS_135: EBS volume not encrypted by default
+  # WHY: bastion and NAT instance root volumes use the account's
+  # default CMK — encryption is on, just not via a custom key.
+  - CKV_AWS_135
+
+  # CKV2_AWS_5: Security group not attached
+  # WHY: Checkov false-positive — SGs are attached via module references
+  # that Checkov can't resolve at static analysis time.
+  - CKV2_AWS_5
+
+# Checks that MUST pass — fail the build if any of these fire
+# (Checkov fails on everything by default; this list is documentation)
+# CKV_AWS_18:  S3 access logging enabled
+# CKV_AWS_52:  S3 MFA delete
+# CKV_AWS_145: S3 encryption with KMS
+# CKV_AWS_57:  S3 not public
+# CKV_AWS_23:  Security group description not generic
+# CKV_AWS_25:  Security group not open to 0.0.0.0/0 on port 22

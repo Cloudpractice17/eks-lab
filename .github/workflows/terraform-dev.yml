@@ -1,0 +1,271 @@
+# WHAT THIS WORKFLOW DOES
+# ─────────────────────────────────────────────────────────────────────
+# On every Pull Request to main:
+#   1. Checkov security scan  — fails on HIGH/CRITICAL misconfigs
+#   2. terraform fmt -check   — fails if any file needs formatting
+#   3. terraform validate     — fails on syntax errors
+#   4. terraform plan         — posts the plan as a PR comment
+#
+# On merge to main (push to main):
+#   1-3. Same checks as above
+#   4. terraform plan         — fresh plan saved to file
+#   5. Human approval gate    — GitHub Environment protection rule
+#   6. terraform apply        — uses the saved plan file
+#
+# WHY GitHub Actions instead of CloudShell:
+# CloudShell sessions expire after 20 minutes of inactivity.
+# terraform apply for EKS takes 15-20 minutes — it gets cut off.
+# GitHub Actions jobs run for up to 6 hours with no timeout risk,
+# full logs, and a permanent audit trail of every apply.
+#
+# HOW AUTHENTICATION WORKS (no access keys stored anywhere):
+# This workflow uses OpenID Connect (OIDC). GitHub proves its identity
+# to AWS directly, AWS issues a short-lived token, and the job assumes
+# your IAM role for the duration of the run. No secrets to rotate.
+
+name: Terraform — Dev Environment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "environments/dev/**"
+      - "modules/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "environments/dev/**"
+      - "modules/**"
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+# Prevent two workflows running apply at the same time
+# (would cause state locking conflicts)
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+env:
+  TF_DIR: environments/dev
+  AWS_REGION: ap-south-1
+  # Suppresses interactive prompts in Terraform
+  TF_IN_AUTOMATION: "true"
+  # Makes Terraform output cleaner in CI logs
+  TF_CLI_ARGS: "-no-color"
+
+permissions:
+  # Required for OIDC token request
+  id-token: write
+  # Required to post PR comments
+  contents: read
+  pull-requests: write
+
+jobs:
+
+  # ── Security scan + validate ────────────────────────────────────────
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      # WHY Checkov before terraform init:
+      # Checkov scans static .tf files — it does not need providers
+      # downloaded. Catching a security misconfiguration here is faster
+      # than catching it after init downloads 200MB of providers.
+      - name: Checkov security scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          config_file: cicd/checkov/.checkov.yaml
+          soft_fail: false
+          output_format: cli
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # WHY fmt check before validate:
+      # fmt is instant (no network). Catch formatting issues first
+      # before spending time on the slower validate step.
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+        # If this fails: run `terraform fmt -recursive` in your repo
+        # and commit the changes
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+
+  # ── Plan ────────────────────────────────────────────────────────────
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    needs: validate
+
+    outputs:
+      # Pass the plan summary to the apply job for the approval comment
+      plan_exit_code: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_DIR }}
+        # exit code 0 = no changes, 1 = error, 2 = changes present
+        run: |
+          terraform plan \
+            -input=false \
+            -out=tfplan \
+            -detailed-exitcode \
+            2>&1 | tee plan-output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      # WHY post as a PR comment:
+      # The plan output tells the reviewer exactly what will change in
+      # AWS before they approve the PR. Without this, approving a PR
+      # is approving code changes without seeing the infra impact.
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_DIR }}/plan-output.txt', 'utf8');
+            const maxLen = 65000;
+            const truncated = plan.length > maxLen
+              ? plan.substring(0, maxLen) + '\n\n... (truncated — see full log in Actions)'
+              : plan;
+
+            const body = `## Terraform Plan — Dev
+
+            <details><summary>Show plan</summary>
+
+            \`\`\`hcl
+            ${truncated}
+            \`\`\`
+            </details>
+
+            *Triggered by @${{ github.actor }} on \`${{ github.head_ref }}\`*`;
+
+            // Delete previous plan comments to keep PR clean
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            for (const c of comments.data) {
+              if (c.body.includes('## Terraform Plan — Dev')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      # Upload plan file so the apply job can use the exact same plan
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 7
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+
+  # ── Apply ────────────────────────────────────────────────────────────
+  # WHY environment: dev here:
+  # GitHub Environments let you add a protection rule: "require approval
+  # from these people before this job runs." Go to:
+  # Repo Settings → Environments → dev → Add required reviewer → your GitHub username
+  # This is the approval gate — no one can apply without it.
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev   # ← THIS IS THE APPROVAL GATE
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # Download the exact plan from the plan job
+      # WHY: if someone pushes another commit between plan and apply,
+      # we still apply the reviewed plan, not a new one that might differ
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        # -auto-approve is correct here — the human approved via the
+        # GitHub Environment protection rule in the previous step.
+        # This is NOT skipping review — it happened at the gate above.
+        run: terraform apply -input=false tfplan
+
+      - name: Show outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform output

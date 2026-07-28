@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and fill in real values.
+
+aws_region   = "us-east-1"
+project_name = "eks-lab"
+zone_name    = "eks.internal"
+
+node_instance_types = ["t3.medium"]
+node_desired_size   = 2
+
+# Find your current IP with: Invoke-RestMethod -Uri "https://checkip.amazonaws.com"
+# Then add /32 to the end — that's what makes it "just you," not a range.
+allowed_ssh_cidr    = "203.0.113.5/32"
+ssh_public_key_path = "C:/Users/you/.ssh/bastion-key.pub"
+
+# IMPORTANT: leave this empty on your first apply. There are no load
+# balancers yet — nothing's deployed to the cluster. Come back and add
+# entries here (see GETTING-STARTED.md step 6) once Jenkins, Argo CD,
+# etc. actually exist and have created their ALBs/NLBs.
+records = {}
+
+# Name of the S3 bucket from bootstrap output
+state_bucket_name = "REPLACE-ME-your-terraform-state-bucket"

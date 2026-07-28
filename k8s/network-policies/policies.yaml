@@ -1,0 +1,213 @@
+# WHY default-deny everywhere:
+# Kubernetes default networking is fully open — every pod can reach
+# every other pod on any port. A compromised Jenkins pod can reach the
+# Argo CD API, your app's database, and every other service in the
+# cluster. Default-deny NetworkPolicy closes all of that.
+#
+# HOW TO READ THESE POLICIES:
+# podSelector: {} means "all pods in this namespace"
+# policyTypes: [Ingress, Egress] means "this policy controls both
+#   incoming and outgoing traffic"
+# An empty ingress/egress spec means "allow nothing"
+# Add explicit allow rules BELOW the default-deny to open only what
+# you actually need.
+#
+# Apply with: kubectl apply -f k8s/network-policies/
+
+---
+# ── jenkins namespace ──────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: jenkins
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+# Jenkins needs to reach the Kubernetes API (for kubectl in pipelines),
+# ECR (to push images), SSM (to fetch secrets), and the internet
+# (to pull Maven dependencies). This allows egress to those destinations.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jenkins-allow-egress
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - port: 443   # HTTPS — ECR, SSM, Maven repos, GitHub
+        - port: 8080  # Jenkins agent connections
+        - port: 53    # DNS resolution
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# Allow inbound to Jenkins UI from the Argo CD and monitoring namespaces
+# (for health checks) and from within jenkins namespace (agents)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jenkins-allow-ingress
+  namespace: jenkins
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8080
+      # Only allow from the same namespace (agents) and monitoring
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: jenkins
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+
+---
+# ── argocd namespace ──────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-allow-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - port: 443   # GitHub (GitOps repo), ECR
+        - port: 6443  # Kubernetes API server
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── monitoring namespace ──────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+# Prometheus needs to scrape metrics from every namespace
+# Allow egress to all namespaces on common metrics ports
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-allow-scrape
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - port: 9090   # Prometheus itself
+        - port: 9091   # Pushgateway
+        - port: 8080   # Jenkins metrics
+        - port: 8443   # Kubernetes API
+        - port: 10250  # kubelet metrics (node exporter)
+        - port: 53
+          protocol: UDP
+
+---
+# ── myapp-dev namespace ───────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: myapp-dev
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+# Allow app pods to receive traffic from the ALB (ingress controller)
+# and to make outbound HTTPS calls (e.g. external APIs)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: myapp-allow
+  namespace: myapp-dev
+spec:
+  podSelector:
+    matchLabels:
+      app: myapp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 8080
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system   # ALB controller
+  egress:
+    - ports:
+        - port: 443
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── myapp-prod namespace ──────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: myapp-prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: myapp-allow
+  namespace: myapp-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: myapp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: 8080
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+  egress:
+    - ports:
+        - port: 443
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

@@ -1,0 +1,9 @@
+output "cluster_name"        { value = module.eks.cluster_name }
+output "bastion_public_ip"   { value = module.bastion.public_ip }
+output "bastion_instance_id" { value = module.bastion.instance_id }
+output "jenkins_instance_id" { value = module.jenkins.instance_id }
+output "ecr_repository_urls" { value = module.ecr.repository_urls }
+output "secret_paths"        { value = module.secrets.secret_paths }
+output "populate_commands"   { value = module.secrets.populate_commands }
+output "sns_topic_arn"       { value = module.observability.sns_topic_arn }
+output "oidc_provider_arn"   { value = module.eks.oidc_provider_arn }

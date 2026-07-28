@@ -1,0 +1,106 @@
+# WHY RBAC hardening matters:
+# By default every pod in every namespace automatically gets a service
+# account token mounted at /var/run/secrets/kubernetes.io/serviceaccount/
+# This token can be used to call the Kubernetes API. For most pods
+# (your app, monitoring exporters, etc.) that is unnecessary and
+# expands the blast radius if the pod is compromised.
+#
+# These manifests:
+# 1. Disable automount on default service accounts (pods that need
+#    API access get a dedicated service account instead)
+# 2. Create read-only cluster roles for monitoring
+# 3. Ensure no workload uses cluster-admin unnecessarily
+
+---
+# Disable automount on default service accounts.
+# Pods that need API access should use a dedicated service account
+# with explicit RBAC — not the default one.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: myapp-dev
+automountServiceAccountToken: false
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: myapp-prod
+automountServiceAccountToken: false
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: monitoring
+automountServiceAccountToken: false
+
+---
+# Read-only ClusterRole for Prometheus — it needs to discover
+# services and pods across all namespaces to scrape metrics,
+# but it should never be able to modify anything
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-read-only
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - nonResourceURLs: [/metrics, /metrics/cadvisor]
+    verbs: [get]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-read-only
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-read-only
+subjects:
+  - kind: ServiceAccount
+    name: kube-prometheus-stack-prometheus
+    namespace: monitoring
+
+---
+# WHY deny cluster-admin to service accounts:
+# This ClusterRole binding prevents any service account in user
+# namespaces from being granted cluster-admin. It is enforced by
+# OPA Gatekeeper or Kyverno if you add a policy engine later —
+# for now this is a reference showing the intent.
+# Current state: document the policy, enforce it by code review.
+# Next state: Kyverno ClusterPolicy that denies cluster-admin bindings.
+#
+# Example Kyverno policy to add later:
+# apiVersion: kyverno.io/v1
+# kind: ClusterPolicy
+# metadata:
+#   name: deny-cluster-admin-sa
+# spec:
+#   validationFailureAction: enforce
+#   rules:
+#   - name: deny-cluster-admin
+#     match:
+#       any:
+#       - resources:
+#           kinds: [ClusterRoleBinding, RoleBinding]
+#     validate:
+#       message: "cluster-admin must not be bound to service accounts"
+#       deny:
+#         conditions:
+#           any:
+#           - key: "{{request.object.roleRef.name}}"
+#             operator: Equals
+#             value: cluster-admin

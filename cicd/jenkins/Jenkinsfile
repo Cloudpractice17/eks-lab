@@ -1,0 +1,113 @@
+// INFRASTRUCTURE PIPELINE — Terraform
+// ─────────────────────────────────────────────────────────────────────
+// Every push:        Checkov security scan + terraform validate + fmt
+// Every PR to main:  terraform plan (saved to file, archived)
+// Merge to main:     fresh plan → human approval → terraform apply
+//
+// WHY the plan runs twice (PR + before apply):
+// Someone could merge another PR between your approval and your apply.
+// Re-running plan immediately before apply catches any drift.
+
+pipeline {
+  agent any
+
+  environment {
+    TF_DIR            = "environments/dev"
+    TF_IN_AUTOMATION  = "true"
+    AWS_DEFAULT_REGION = "us-east-1"
+  }
+
+  options {
+    ansiColor("xterm")
+    timeout(time: 60, unit: "MINUTES")
+    buildDiscarder(logRotator(numToKeepStr: "10"))
+  }
+
+  stages {
+
+    stage("Checkov Security Scan") {
+      steps {
+        sh '''
+          echo "=== Checkov: scanning all .tf files for misconfigurations ==="
+          pip3 install checkov --quiet
+
+          checkov \
+            --directory . \
+            --config-file cicd/checkov/.checkov.yaml \
+            --output cli \
+            --output junitxml \
+            --output-file-path . \
+            --soft-fail-on MEDIUM \
+            --hard-fail-on HIGH,CRITICAL
+        '''
+        // WHY MEDIUM is soft-fail: it appears in the report and is visible
+        // to reviewers but doesn't block the build. HIGH and CRITICAL do.
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: "results_junitxml.xml"
+        }
+      }
+    }
+
+    stage("Validate") {
+      steps {
+        dir(env.TF_DIR) {
+          sh '''
+            terraform init -input=false
+            terraform validate
+            terraform fmt -check -recursive
+          '''
+          // fmt -check fails if any file is not correctly formatted.
+          // Run `terraform fmt -recursive` locally before committing.
+        }
+      }
+    }
+
+    stage("Plan") {
+      steps {
+        dir(env.TF_DIR) {
+          sh '''
+            terraform plan -input=false -out=tfplan
+            terraform show -no-color tfplan
+          '''
+          // -out saves the plan binary so Apply uses this exact plan,
+          // not a re-generated one that might differ if state changed.
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: "${env.TF_DIR}/tfplan", allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage("Approval") {
+      when { branch "main" }
+      steps {
+        timeout(time: 24, unit: "HOURS") {
+          input(
+            message: "Review the plan output above. Approve to apply to dev?",
+            ok: "Apply",
+            submitter: "infra-team,saran"
+          )
+        }
+      }
+    }
+
+    stage("Apply") {
+      when { branch "main" }
+      steps {
+        dir(env.TF_DIR) {
+          sh "terraform apply -input=false tfplan"
+        }
+      }
+    }
+  }
+
+  post {
+    success { echo "Infrastructure apply complete." }
+    failure { echo "Pipeline failed — review the stage logs above." }
+    always  { cleanWs() }
+  }
+}

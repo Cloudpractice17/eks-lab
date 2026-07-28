@@ -1,0 +1,65 @@
+---
+# WHY two Argo CD Application objects, not one:
+# Dev and prod point at different folders in the GitOps repo and
+# different namespaces. They sync independently. A bad image in dev
+# cannot affect prod unless someone explicitly promotes it.
+
+# Dev Application — auto-syncs on every GitOps repo commit
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp-dev
+  namespace: argocd
+  # WHY this finalizer: without it, deleting this Application object
+  # from Kubernetes leaves all the pods and services it created still
+  # running. With it, Argo CD cleans up everything it deployed before
+  # the Application object is removed.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_ORG/gitops-repo
+    targetRevision: main
+    path: dev/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: myapp-dev
+  syncPolicy:
+    automated:
+      # WHY prune: if you remove a manifest from the GitOps repo,
+      # Argo CD deletes the corresponding Kubernetes resource. Without
+      # this, deleted manifests leave orphan resources running.
+      prune: true
+      # WHY selfHeal: if someone makes a manual kubectl change that
+      # drifts from the repo, Argo CD reverts it automatically. The
+      # GitOps repo is always the source of truth.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# Prod Application — manual sync only, requires explicit approval
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_ORG/gitops-repo
+    targetRevision: main
+    path: prod/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: myapp-prod
+  syncPolicy:
+    # WHY NO automated sync for prod:
+    # Prod syncs only when a human explicitly clicks Sync in the Argo
+    # CD UI or runs `argocd app sync myapp-prod`. Auto-sync in prod
+    # means a bad commit in the GitOps repo deploys itself to prod
+    # immediately — the manual gate is intentional.
+    syncOptions:
+      - CreateNamespace=true

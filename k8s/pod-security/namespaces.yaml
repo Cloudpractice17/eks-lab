@@ -1,0 +1,104 @@
+# WHY Pod Security Standards (PSS) instead of PodSecurityPolicy (PSP):
+# PSP was deprecated in Kubernetes 1.21 and removed in 1.25. PSS is
+# the replacement. It works via namespace labels — no webhook, no
+# custom admission controller needed. Three profiles exist:
+#
+# privileged  — unrestricted (never use in production)
+# baseline    — blocks known privilege escalation paths:
+#               no privileged containers, no host paths, no host networking
+#               Suitable for: Jenkins, Argo CD, monitoring tools
+# restricted  — full hardening:
+#               must run as non-root, read-only root filesystem, drops all
+#               Linux capabilities. Suitable for: your app workloads
+#
+# Three modes:
+# enforce — reject pods that violate the policy
+# audit   — allow but log violations to audit log
+# warn    — allow but show a warning to kubectl users
+#
+# Strategy: enforce=baseline everywhere (baseline rarely breaks real
+# workloads), audit+warn=restricted so you can see what needs hardening
+# before you enforce it.
+#
+# Apply with: kubectl apply -f k8s/pod-security/
+
+---
+# kube-system must remain privileged — AWS CNI, kube-proxy, etc.
+# need host networking and elevated privileges to function
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jenkins
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+# WHY myapp-dev uses restricted and not baseline:
+# Your application was built with a non-root user in the Dockerfile.
+# It should be able to meet the Restricted profile. Enforcing Restricted
+# here means if a future image accidentally runs as root, it gets blocked
+# before it reaches even the dev cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp-dev
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp-prod
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

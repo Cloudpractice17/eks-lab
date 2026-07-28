@@ -1,0 +1,16 @@
+aws_region          = "us-east-1"
+project_name        = "eks-lab"
+state_bucket_name   = "REPLACE-ME-your-terraform-state-bucket"
+zone_name           = "eks.internal"
+
+allowed_ssh_cidr    = "203.0.113.5/32"
+ssh_public_key_path = "C:/Users/you/.ssh/bastion-key.pub"
+
+node_instance_types = ["t3.large"]
+node_desired_size   = 3
+node_min_size       = 2
+node_max_size       = 6
+
+alert_email         = "your-email@example.com"
+ecr_repositories    = ["myapp"]
+records             = {}
