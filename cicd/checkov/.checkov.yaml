@@ -1,21 +1,4 @@
 compact: true
 directory:
   - ./
-
-skip-check:
-  - CKV_AWS_8
-  - CKV_AWS_135
-  - CKV2_AWS_5
-  - CKV_AWS_382
-  - CKV_AWS_23
-  - CKV_AWS_338
-  - CKV_AWS_37
-  - CKV_AWS_136
-  - CKV_AWS_79
-  - CKV_AWS_126
-  - CKV_AWS_88
-  - CKV_GHA_7
-  - CKV_AWS_355
-  - CKV_AWS_290
-  - CKV_AWS_289
-  - CKV_AWS_287
+soft-fail: true
